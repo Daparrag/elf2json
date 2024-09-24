@@ -156,21 +156,26 @@ module OASISString = struct
     nsplitf str ((=) c)
 
 
-  let find ~what ?(offset=0) str =
+  let find ~what ?(offset=0) str_list  =
     let what_idx = ref 0 in
     let str_idx = ref offset in
-      while !str_idx < String.length str &&
+    let rec search_list = function
+      | [] -> raise Not_found
+      | str :: rest ->
+      	while !str_idx < String.length str &&
             !what_idx < String.length what do
-        if str.[!str_idx] = what.[!what_idx] then
-          incr what_idx
-        else
-          what_idx := 0;
-        incr str_idx
-      done;
-      if !what_idx <> String.length what then
-        raise Not_found
+          if str.[!str_idx] = what.[!what_idx] then
+             incr what_idx
+          else
+           what_idx := 0;
+           incr str_idx
+        done;
+        if !what_idx <> String.length what then 
+                search_list rest
       else
         !str_idx - !what_idx
+    in
+    search_list str_list
 
 
   let sub_start str len =
@@ -315,7 +320,7 @@ module OASISUtils = struct
 
 
   let compare_csl s1 s2 =
-    String.compare (String.lowercase s1) (String.lowercase s2)
+    String.compare (String.lowercase_ascii s1) (String.lowercase_ascii s2)
 
 
   module HashStringCsl =
@@ -324,10 +329,10 @@ module OASISUtils = struct
          type t = string
 
          let equal s1 s2 =
-             (String.lowercase s1) = (String.lowercase s2)
+             (String.lowercase_ascii s1) = (String.lowercase_ascii s2)
 
          let hash s =
-           Hashtbl.hash (String.lowercase s)
+           Hashtbl.hash (String.lowercase_ascii s)
        end)
 
   module SetStringCsl =
@@ -365,7 +370,7 @@ module OASISUtils = struct
           else
             buf
         in
-          String.lowercase buf
+          String.lowercase_ascii buf
       end
 
 
@@ -471,7 +476,7 @@ module PropList = struct
         order     = Queue.create ();
         name_norm =
           (if case_insensitive then
-             String.lowercase
+             String.lowercase_ascii
            else
              fun s -> s);
       }
@@ -1374,12 +1379,19 @@ module OASISFeatures = struct
   open OASISGettext
   open OASISVersion
 
-  module MapPlugin =
-    Map.Make
-      (struct
-         type t = plugin_kind * name
-         let compare = Pervasives.compare
-       end)
+module MapPlugin =
+  Map.Make(
+    struct
+      type t = plugin_kind * name
+
+      let compare (x: t) (y: t) =
+        let (kind1, name1) = x in
+        let (kind2, name2) = y in
+        match compare kind1 kind2 with
+        | 0 -> compare name1 name2
+        | c -> c
+    end
+  )
 
   module Data =
   struct
@@ -1434,6 +1446,7 @@ module OASISFeatures = struct
               t.plugin_versions []))
   end
 
+  type origin_t = string
   type origin =
     | Field of string * string
     | Section of string
@@ -1822,13 +1835,13 @@ module OASISUnixPath = struct
   let capitalize_file f =
     let dir = dirname f in
     let base = basename f in
-    concat dir (String.capitalize base)
+    concat dir (String.capitalize_ascii base)
 
 
   let uncapitalize_file f =
     let dir = dirname f in
     let base = basename f in
-    concat dir (String.uncapitalize base)
+    concat dir (String.uncapitalize_ascii base)
 
 
 end
@@ -3175,91 +3188,73 @@ module BaseEnv = struct
       Buffer.contents buff
 
 
-  let var_define
-        ?(hide=false)
-        ?(dump=true)
-        ?short_desc
-        ?(cli=CLINone)
-        ?arg_help
-        ?group
-        name (* TODO: type constraint on the fact that name must be a valid OCaml
-                  id *)
-        dflt =
-
-    let default =
-      [
-        OFileLoad, (fun () -> MapString.find name !env_from_file);
-        ODefault,  dflt;
-        OGetEnv,   (fun () -> Sys.getenv name);
-      ]
-    in
-
-    let extra =
-      {
-        hide     = hide;
-        dump     = dump;
-        cli      = cli;
-        arg_help = arg_help;
-        group    = group;
-      }
-    in
-
-    (* Try to find a value that can be defined
-     *)
-    let var_get_low lst =
-      let errors, res =
-        List.fold_left
-          (fun (errors, res) (o, v) ->
-             if res = None then
-               begin
-                 try
-                   errors, Some (v ())
-                 with
-                   | Not_found ->
-                        errors, res
-                   | Failure rsn ->
-                       (rsn :: errors), res
-                   | e ->
-                       (Printexc.to_string e) :: errors, res
-               end
-             else
+   let var_define
+       ?(hide = false)
+       ?(dump = true)
+       ?short_desc
+       ?(cli = CLINone)
+       ?arg_help
+       ?group
+       name
+       dflt =
+     let default =
+       [
+         OFileLoad, (fun () -> MapString.find name !env_from_file);
+         ODefault, dflt;
+         OGetEnv, (fun () -> Sys.getenv name);
+       ]
+     in
+     let extra =
+       {
+         hide = hide;
+         dump = dump;
+         cli = cli;
+         arg_help = arg_help;
+         group = group;
+       }
+     in
+     let var_get_low lst =
+       let errors, res =
+         List.fold_left
+           (fun (errors, res) (o, v) ->
+              if res = None then
+                begin
+                  try
+                    errors, Some (v ())
+                  with
+                  | Not_found -> errors, res
+                  | Failure rsn -> (rsn :: errors), res
+                  | e -> (Printexc.to_string e) :: errors, res
+                end
+              else
                errors, res)
-          ([], None)
-          (List.sort
-             (fun (o1, _) (o2, _) ->
-                Pervasives.compare o2 o1)
-             lst)
-      in
-        match res, errors with
-          | Some v, _ ->
-              v
-          | None, [] ->
-              raise (Not_set (name, None))
-          | None, lst ->
-              raise (Not_set (name, Some (String.concat (s_ ", ") lst)))
-    in
-
-    let help =
-      match short_desc with
-        | Some fs -> Some fs
-        | None -> None
-    in
-
-    let var_get_lst =
-      FieldRO.create
-        ~schema
-        ~name
-        ~parse:(fun ?(context=ODefault) s -> [context, fun () -> s])
-        ~print:var_get_low
-        ~default
-        ~update:(fun ?context x old_x -> x @ old_x)
-        ?help
-        extra
-    in
-
-      fun () ->
-        var_expand (var_get_low (var_get_lst env))
-
+           ([], None)
+           (List.sort
+              (fun (o1, _) (o2, _) -> Stdlib.compare o2 o1)
+              lst)
+       in
+       match res, errors with
+       | Some v, _ -> v
+       | None, [] -> raise (Not_set (name, None))
+       | None, lst -> raise (Not_set (name, Some (String.concat (s_ ", ") lst)))
+     in
+     let help =
+       match short_desc with
+       | Some fs -> Some fs
+       | None -> None
+     in
+     let var_get_lst =
+       FieldRO.create
+         ~schema
+         ~name
+         ~parse:(fun ?(context = ODefault) s -> [context, fun () -> s])
+         ~print:var_get_low
+         ~default
+         ~update:(fun ?context x old_x -> x @ old_x)
+         ?help
+         extra
+     in
+     fun () -> var_expand (var_get_low (var_get_lst env))
 
   let var_redefine
         ?hide
@@ -5845,8 +5840,8 @@ module InternalInstallPlugin = struct
     let make_fnames modul sufx =
       List.fold_right
         begin fun sufx accu ->
-          (String.capitalize modul ^ sufx) ::
-          (String.uncapitalize modul ^ sufx) ::
+          (String.capitalize_ascii modul ^ sufx) ::
+          (String.uncapitalize_ascii modul ^ sufx) ::
           accu
         end
         sufx
@@ -6816,7 +6811,7 @@ let setup_t =
        };
      oasis_fn = Some "_oasis";
      oasis_version = "0.4.5";
-     oasis_digest = Some "ÃÛ\021ƒ\029\014\007\128?\029F\006\001œ:≤";
+     oasis_digest = Some "√å√≥\021√Ñ\029\014\007\128?\029F\006\001√è:¬≤";
      oasis_exec = None;
      oasis_setup_args = [];
      setup_update = false
@@ -6827,3 +6822,4 @@ let setup () = BaseSetup.setup setup_t;;
 # 6828 "setup.ml"
 (* OASIS_STOP *)
 let () = setup ();;
+
